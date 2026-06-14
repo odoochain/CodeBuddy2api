@@ -1,26 +1,27 @@
 @echo off
 echo Starting CodeBuddy2API...
 
-REM Check if Python is installed
-python --version >nul 2>&1
+REM Check if uv is installed
+uv --version >nul 2>&1
 if errorlevel 1 (
-    echo Python is not installed or not in PATH
+    echo uv is not installed or not in PATH
+    echo Install it from https://docs.astral.sh/uv/getting-started/installation/
     pause
     exit /b 1
 )
 
-REM Check if virtual environment exists
-if not exist "venv" (
-    echo Creating virtual environment...
-    python -m venv venv
+REM Create virtual environment if not exists (Python <3.14)
+if not exist ".venv" (
+    echo Creating virtual environment with uv (Python ^<3.14^)...
+    uv venv --python-preference only-managed --python ">=3.10,<3.14"
 )
 
 REM Activate virtual environment
-call venv\Scripts\activate.bat
+call .venv\Scripts\activate.bat
 
 REM Install dependencies
 echo Installing dependencies...
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 REM Check environment variables and load from .env if exists
 if not defined CODEBUDDY_PASSWORD (
