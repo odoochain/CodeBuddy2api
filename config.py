@@ -29,7 +29,7 @@ _DEFAULT_CONFIG = {
     "CODEBUDDY_INTERNET_ENVIRONMENT": "",
     "CODEBUDDY_CREDS_DIR": ".codebuddy_creds",
     "CODEBUDDY_LOG_LEVEL": "INFO",
-    "CODEBUDDY_MODELS": "claude-4.0,claude-3.7,gpt-5,gpt-5-mini,gpt-5-nano,o4-mini,gemini-2.5-flash,gemini-2.5-pro,auto-chat",
+    "CODEBUDDY_MODELS": "",
     "CODEBUDDY_ROTATION_COUNT": 1
 }
 
@@ -148,8 +148,22 @@ def get_codebuddy_creds_dir() -> str:
 def get_log_level() -> str:
     return str(_get_config_value("CODEBUDDY_LOG_LEVEL")).upper()
 
+# CN (copilot.tencent.com) 默认模型列表
+_CN_DEFAULT_MODELS = "deepseek-v4-pro,deepseek-v4-flash,deepseek-v3-2-volc,glm-5.1,glm-5.0,glm-5.0-turbo,glm-5v-turbo,glm-4.7,minimax-m3-pay,minimax-m2.7,kimi-k2.6,hy3-preview,auto-chat"
+
+# 国际版 (www.codebuddy.ai) 默认模型列表
+_INTERNATIONAL_DEFAULT_MODELS = "claude-4.0,claude-3.7,gpt-5,gpt-5-mini,gpt-5-nano,o4-mini,gemini-2.5-flash,gemini-2.5-pro,auto-chat"
+
+
 def get_available_models() -> list:
-    models_str = str(_get_config_value("CODEBUDDY_MODELS"))
+    models_str = str(_get_config_value("CODEBUDDY_MODELS") or "").strip()
+    if not models_str:
+        # 未显式配置时，根据网络环境自动选择默认模型列表
+        internet_env = get_codebuddy_internet_environment()
+        if internet_env in ("internal", "ioa"):
+            models_str = _CN_DEFAULT_MODELS
+        else:
+            models_str = _INTERNATIONAL_DEFAULT_MODELS
     return [model.strip() for model in models_str.split(",")]
 
 def get_rotation_count() -> int:
