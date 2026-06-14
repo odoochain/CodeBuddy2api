@@ -5,17 +5,13 @@
 ## 1. 获取代码
 
 ```bash
-git clone https://github.com/sliverkiss/codebuddy2api.git
+git clone https://github.com/xueyue33/codebuddy2api.git
 cd codebuddy2api
 ```
 
 ## 2. 准备环境变量
 
-```bash
-cp .env.example .env
-```
-
-编辑 `.env`，至少填写以下内容：
+创建 `.env` 文件，至少填写以下内容：
 
 ```dotenv
 # 访问本代理服务的鉴权密码（给客户端使用）
@@ -70,7 +66,7 @@ curl -X POST "http://127.0.0.1:8001/v1/chat/completions" \
   -H "Authorization: Bearer your_proxy_password" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5.1",
+    "model": "auto-chat",
     "messages": [{"role": "user", "content": "你是什么模型"}],
     "stream": false
   }'
@@ -87,7 +83,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="glm-5.1",
+    model="auto-chat",
     messages=[{"role": "user", "content": "你是什么模型"}]
 )
 print(resp.choices[0].message.content)

@@ -47,13 +47,7 @@ python web.py
 
 ### 3. 配置环境变量
 
-项目启动需要一些基本配置。请将根目录下的 `.env.example` 文件复制一份并重命名为 `.env`：
-
-```bash
-cp .env.example .env
-```
-
-然后，用你的文本编辑器打开 `.env` 文件，**至少需要设置以下必需的变量**：
+项目启动需要一些基本配置。请在项目根目录创建 `.env` 文件，**至少需要设置以下必需的变量**：
 
 ```dotenv
 # (必需) API服务的访问密码，客户端连接时需要提供此密码
@@ -170,10 +164,15 @@ curl -X POST "http://127.0.0.1:8001/codebuddy/v1/chat/completions" \
 
 ## 📝 API 端点
 
-- `POST /codebuddy/v1/chat/completions`: 核心接口，用于发送聊天请求。
-- `GET /codebuddy/v1/models`: 获取在 `.env` 文件中配置的模型列表。
-- `GET /codebuddy/v1/credentials`: （需要认证）在 Web UI 中用于列出所有凭证。
-- `POST /codebuddy/v1/credentials`: （需要认证）在 Web UI 中用于添加新凭证。
+- `POST /v1/chat/completions`: 核心接口，用于发送聊天请求。
+- `GET /v1/models`: 获取可用模型列表。
+- `GET /v1/credentials`: （需要认证）列出所有凭证。
+- `POST /v1/credentials`: （需要认证）添加新凭证。
+- `POST /v1/credentials/select`: （需要认证）手动选择凭证。
+- `POST /v1/credentials/auto`: （需要认证）恢复自动凭证轮换。
+- `POST /v1/credentials/toggle-rotation`: （需要认证）切换自动凭证轮换。
+- `GET /v1/credentials/current`: （需要认证）获取当前凭证信息。
+- `POST /v1/credentials/delete`: （需要认证）删除凭证。
 - `GET /health`: 服务的健康检查端点。
 
 ## 🔧 项目结构
@@ -189,14 +188,17 @@ codebuddy2api/
 │   ├── frontend_router.py         # Web管理界面的路由
 │   ├── settings_router.py         # 设置管理路由
 │   ├── usage_stats_manager.py     # 使用统计管理器
-│   └── keyword_replacer.py        # 关键词替换模块
+│   ├── keyword_replacer.py        # 关键词替换模块
+│   └── models.py                  # 数据模型定义
 ├── frontend/
 │   └── admin.html                 # Web管理界面的前端页面
+├── config/                        # 配置目录
+│   └── config.json                # 用户配置文件（可选）
 ├── .codebuddy_creds/              # 存放CodeBuddy凭证的目录 (Git会忽略其中的文件)
 ├── web.py                         # FastAPI服务主入口
 ├── config.py                      # 环境变量配置管理
 ├── requirements.txt               # Python依赖列表
-├── .env.example                   # 环境变量示例文件
+├── .env                           # 环境变量配置文件
 ├── start.bat                      # Windows一键启动脚本
 ├── docker-compose.yml             # Docker Compose 配置
 ├── Dockerfile                     # Docker 镜像构建文件
@@ -221,7 +223,7 @@ codebuddy2api/
 | `CODEBUDDY_LOG_LEVEL` | `INFO` | 日志级别，可选 `DEBUG`, `INFO`, `WARNING`, `ERROR`。 |
 | `CODEBUDDY_MODELS` | (列表) | 向客户端报告的可用模型列表，用逗号分隔。 |
 | `CODEBUDDY_SSL_VERIFY` | `false` | SSL验证开关，设置为 `true` 启用SSL验证。 |
-| `CODEBUDDY_ROTATION_COUNT` | `10` | 凭证轮换计数，每N次请求后切换凭证。 |
+| `CODEBUDDY_ROTATION_COUNT` | `1` | 凭证轮换计数，每N次请求后切换凭证。 |
 
 ## 🐛 故障排除
 
@@ -234,6 +236,9 @@ codebuddy2api/
 
 - **"Invalid password"**:
   - 这意味着你访问本服务时，请求头中提供的 Bearer Token 与你在 `.env` 文件中设置的 `CODEBUDDY_PASSWORD` 不匹配。
+
+- **SSL 验证错误**:
+  - 如果遇到 SSL 验证错误，可以在 `.env` 文件中设置 `CODEBUDDY_SSL_VERIFY=false` 来禁用 SSL 验证（仅在开发环境使用）。
 
 - **需要查看详细日志**:
   - 在 `.env` 文件中设置 `CODEBUDDY_LOG_LEVEL=DEBUG`，然后重启服务。
