@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any, List, AsyncGenerator
 
 import httpx
 from fastapi import APIRouter, HTTPException, Depends, Request, Header
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from .auth import authenticate
 from .codebuddy_api_client import codebuddy_api_client
@@ -655,9 +655,71 @@ class CodeBuddyStreamService:
 class RequestProcessor:
     """请求预处理器 - 线程安全的请求处理"""
     
+    # 支持透传的 OpenAI 标准采样参数
+    _PASSTHROUGH_FIELDS = (
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "max_completion_tokens",
+        "frequency_penalty",
+        "presence_penalty",
+        "stop",
+        "seed",
+        "n",
+        "logprobs",
+        "user",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream_options",
+    )
+
     @staticmethod
-    def prepare_payload(request_body: Dict[str, Any]) -> Dict[str, Any]:
-        """准备请求载荷"""
+    def _normalize_response_format(value: Any) -> Optional[Dict[str, Any]]:
+        """规范化 response_format 输入。
+
+        - 已经是 dict 时原样保留
+        - "json_object" / "json_schema" 字符串按 OpenAI v1 规范展开
+        - 其他值返回 None（视为未指定）
+        """
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            if value in ("json_object", "json_schema"):
+                return {"type": value}
+        return None
+
+    @staticmethod
+    def _apply_json_format_hint(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """当 response_format=json_object 时，在 system 提示中追加 JSON 输出要求。
+
+        - 已存在 system 消息：追加一句约束（保留原文）
+        - 没有 system 消息：插入一条新的 system 消息
+        """
+        hint = "你必须仅输出合法 JSON 格式的响应，不要包含任何额外解释或 markdown 围栏。"
+        for msg in messages:
+            if msg.get("role") == "system":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    if "json" not in content.lower():
+                        msg["content"] = f"{content}\n\n{hint}"
+                return messages
+        # 没有 system 消息，插入一条
+        return [{"role": "system", "content": hint}] + messages
+
+    @classmethod
+    def prepare_payload(cls, request_body: Dict[str, Any]) -> Dict[str, Any]:
+        """准备请求载荷
+
+        处理：
+        - 强制 stream=True（CodeBuddy 内部统一按流式处理）
+        - 模型别名映射
+        - 至少 2 条消息（CodeBuddy 要求）
+        - response_format 规范化与 JSON 模式系统提示
+        - 透传 OpenAI 标准采样/工具/用户参数
+        """
         payload = request_body.copy()
         payload["stream"] = True  # CodeBuddy 只支持流式请求
 
@@ -667,18 +729,38 @@ class RequestProcessor:
             mapped_model = MODEL_ALIASES.get(model.strip().lower())
             if mapped_model:
                 payload["model"] = mapped_model
-        
+
         # 处理消息长度要求：CodeBuddy要求至少2条消息
         messages = payload.get("messages", [])
         if len(messages) == 1 and messages[0].get("role") == "user":
             system_msg = {"role": "system", "content": "You are a helpful assistant."}
             payload["messages"] = [system_msg] + messages
-        
+
+        # response_format 归一化；json_object 模式自动追加 system 提示
+        normalized_rf = cls._normalize_response_format(payload.get("response_format"))
+        if normalized_rf is not None:
+            payload["response_format"] = normalized_rf
+            if normalized_rf.get("type") in ("json_object", "json_schema"):
+                payload["messages"] = cls._apply_json_format_hint(payload["messages"])
+        else:
+            # 非法值清理，避免上游误解
+            payload.pop("response_format", None)
+
+        # 显式列出允许透传的字段，剔除未知字段（保持上游请求干净）
+        for field in list(payload.keys()):
+            if field in cls._PASSTHROUGH_FIELDS:
+                continue
+            # 已知的内务字段保留
+            if field in ("model", "messages", "stream", "response_format"):
+                continue
+            # 其它未知字段直接删除，避免上游拒收
+            payload.pop(field, None)
+
         # 应用关键词替换
         for msg in payload.get("messages", []):
             if msg.get("role") == "system":
                 msg["content"] = apply_keyword_replacement_to_system_message(msg.get("content"))
-        
+
         return payload
     
     @staticmethod
@@ -1006,3 +1088,207 @@ async def delete_credential(request: Request, _token: str = Depends(authenticate
     except Exception as e:
         logger.error(f"删除凭证失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# === OpenAI 兼容接口补齐：completions / embeddings ===
+
+@router.post("/v1/completions", summary="OpenAI legacy completions (prompt → chat shim)")
+async def legacy_completions(
+    request: Request,
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_conversation_request_id: Optional[str] = Header(None, alias="X-Conversation-Request-ID"),
+    x_conversation_message_id: Optional[str] = Header(None, alias="X-Conversation-Message-ID"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    _token: str = Depends(authenticate),
+):
+    """OpenAI 旧式 /v1/completions 接口，内部转写为 /v1/chat/completions。
+
+    接受：
+    - prompt: str | list[str]  单条或多条提示
+    - model: str              模型名（缺省取配置中第一个可用模型）
+    - 其余 OpenAI 标准参数（temperature / max_tokens / top_p / stop / stream / ...）
+
+    返回的响应包含 ``text`` 字段以兼容 OpenAI completions 协议；
+    同时在 ``choices[i].message.content`` 暴露 chat 形态便于 SDK 兼容。
+    """
+    try:
+        try:
+            body = await request.json()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON request body: {str(e)}")
+
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+        prompt = body.get("prompt")
+        if prompt is None or (isinstance(prompt, str) and not prompt.strip()):
+            raise HTTPException(status_code=400, detail="'prompt' is required and must be non-empty")
+        if not isinstance(prompt, (str, list)):
+            raise HTTPException(status_code=400, detail="'prompt' must be a string or list of strings")
+
+        prompts = [prompt] if isinstance(prompt, str) else list(prompt)
+        if not all(isinstance(p, str) for p in prompts):
+            raise HTTPException(status_code=400, detail="'prompt' list must contain only strings")
+
+        model = body.get("model") or (get_available_models_list()[0] if get_available_models_list() else "codebuddy")
+        if model not in set(get_available_models_list()):
+            raise HTTPException(
+                status_code=404,
+                detail={"error": {"message": f"model '{model}' not found", "type": "invalid_request_error"}},
+            )
+
+        # 构造等价 chat 请求体，复用现有 chat 通道
+        chat_body = {
+            "model": model,
+            "messages": [{"role": "user", "content": p} for p in prompts],
+            "stream": bool(body.get("stream", False)),
+        }
+        for k in (
+            "temperature", "top_p", "max_tokens", "max_completion_tokens",
+            "frequency_penalty", "presence_penalty", "stop", "seed",
+            "n", "logprobs", "user", "tools", "tool_choice",
+            "parallel_tool_calls", "stream_options", "response_format",
+        ):
+            if k in body:
+                chat_body[k] = body[k]
+
+        # 复用 chat 通道处理（同样的鉴权/限流/熔断/重试）
+        auth_context = CredentialManager.get_auth_context()
+        headers = codebuddy_api_client.generate_codebuddy_headers(
+            auth=auth_context,
+            user_id=auth_context.get("user_id"),
+            conversation_id=x_conversation_id,
+            conversation_request_id=x_conversation_request_id,
+            conversation_message_id=x_conversation_message_id,
+            request_id=x_request_id,
+        )
+
+        payload = RequestProcessor.prepare_payload(chat_body)
+        usage_stats_manager.record_model_usage(payload.get("model", "unknown"))
+
+        limiter = get_default_limiter()
+        breaker = get_default_breaker()
+        async with limiter.slot():
+            async with guarded(breaker):
+                service = CodeBuddyStreamService()
+                client_wants_stream = bool(body.get("stream", False))
+                if client_wants_stream:
+                    # 流式：把 chat 流的 choices[0].delta.content 投射为 text
+                    inner = await service.handle_stream_response(payload, headers)
+
+                    async def rewrap():
+                        async for line in inner.body_iterator:
+                            yield _reshape_completions_sse(line, model)
+                    return StreamingResponse(rewrap(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+                chat_result = await service.handle_non_stream_response(payload, headers)
+                return _reshape_completions_response(chat_result, model)
+
+    except HTTPException:
+        raise
+    except CircuitOpenError as e:
+        logger.warning(f"completions: 熔断开启，拒绝请求: {e}")
+        raise HTTPException(status_code=503, detail=f"上游服务暂时不可用: {e}")
+    except Exception as e:
+        logger.error(f"/v1/completions 错误: {e}")
+        raise HTTPException(status_code=500, detail=f"completions error: {str(e)}")
+
+
+def _reshape_completions_response(chat_response: Dict[str, Any], model: str) -> Dict[str, Any]:
+    """把 chat.completion 响应重塑为 legacy completions 形态。"""
+    choices_in = chat_response.get("choices") or []
+    out_choices = []
+    for i, ch in enumerate(choices_in):
+        text = (ch.get("message") or {}).get("content") or ""
+        out_choices.append({
+            "text": text,
+            "index": i,
+            "logprobs": ch.get("logprobs"),
+            "finish_reason": ch.get("finish_reason") or "stop",
+        })
+    out = {
+        "id": chat_response.get("id") or f"cmpl-{uuid.uuid4().hex}",
+        "object": "text_completion",
+        "created": chat_response.get("created") or int(time.time()),
+        "model": chat_response.get("model") or model,
+        "choices": out_choices,
+    }
+    if "usage" in chat_response:
+        out["usage"] = chat_response["usage"]
+    if "system_fingerprint" in chat_response:
+        out["system_fingerprint"] = chat_response["system_fingerprint"]
+    return out
+
+
+def _reshape_completions_sse(line: str, model: str) -> str:
+    """将 chat 形态的 SSE 行重塑为 completions 形态（兼容 OpenAI completions 流协议）。"""
+    stripped = line.rstrip("\r\n")
+    if not stripped or stripped.startswith(":"):
+        return line
+    if stripped == "data: [DONE]":
+        return "data: [DONE]\n\n"
+    if not stripped.startswith("data: "):
+        return line
+    try:
+        chunk = json.loads(stripped[6:])
+    except json.JSONDecodeError:
+        return line
+    if not isinstance(chunk, dict) or not chunk.get("choices"):
+        return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    out_choices = []
+    for i, ch in enumerate(chunk.get("choices") or []):
+        delta = (ch or {}).get("delta") or {}
+        text = delta.get("content") or ""
+        out_choices.append({
+            "text": text,
+            "index": i,
+            "logprobs": (ch or {}).get("logprobs"),
+            "finish_reason": (ch or {}).get("finish_reason"),
+        })
+    out = {
+        "id": chunk.get("id") or f"cmpl-{uuid.uuid4().hex}",
+        "object": "text_completion",
+        "created": chunk.get("created") or int(time.time()),
+        "model": chunk.get("model") or model,
+        "choices": out_choices,
+    }
+    return f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
+
+
+@router.post("/v1/embeddings", summary="OpenAI-compatible embeddings endpoint")
+async def create_embeddings(request: Request, _token: str = Depends(authenticate)):
+    """OpenAI 兼容 /v1/embeddings。
+
+    CodeBuddy 当前不提供 embeddings 模型，此端点按 OpenAI v1 错误格式返回 501，
+    以让客户端 SDK 能够正确解析错误结构。
+    """
+    try:
+        try:
+            body = await request.json()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON request body: {str(e)}")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+        if "input" not in body:
+            raise HTTPException(status_code=400, detail="'input' is required")
+        if not body.get("model"):
+            raise HTTPException(status_code=400, detail="'model' is required")
+
+        # OpenAI 风格错误体
+        error_body = {
+            "error": {
+                "message": "Embeddings are not supported by the CodeBuddy backend.",
+                "type": "unsupported_request",
+                "param": None,
+                "code": "model_not_supported",
+            }
+        }
+        return JSONResponse(status_code=501, content=error_body)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"/v1/embeddings 错误: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": str(e), "type": "internal_error"}},
+        )
