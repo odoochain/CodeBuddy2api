@@ -18,6 +18,16 @@ from .codebuddy_api_client import codebuddy_api_client
 from .codebuddy_token_manager import codebuddy_token_manager
 from .usage_stats_manager import usage_stats_manager
 from .keyword_replacer import apply_keyword_replacement_to_system_message
+from .reliability import (
+    RetryPolicy,
+    call_with_retry,
+    classify_exception,
+    get_default_breaker,
+    get_default_limiter,
+    get_metadata_cache,
+    CircuitOpenError,
+    guarded,
+)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -68,11 +78,34 @@ class SecurityConfig:
         return ssl_verify
 
 # --- HTTP 客户端配置 ---
-HTTP_CLIENT_CONFIG = {
-    "verify": SecurityConfig.get_ssl_verify(),
-    "timeout": httpx.Timeout(300.0, connect=30.0, read=300.0),
-    "limits": httpx.Limits(max_keepalive_connections=20, max_connections=100)
-}
+def _build_http_client_config() -> dict:
+    """从环境变量构建 HTTP 客户端配置，支持运行时调优"""
+    import os
+    try:
+        keepalive = int(os.getenv("CODEBUDDY_KEEPALIVE", "20"))
+    except ValueError:
+        keepalive = 20
+    try:
+        max_conns = int(os.getenv("CODEBUDDY_MAX_CONNECTIONS", "100"))
+    except ValueError:
+        max_conns = 100
+    try:
+        connect_timeout = float(os.getenv("CODEBUDDY_CONNECT_TIMEOUT", "30"))
+    except ValueError:
+        connect_timeout = 30.0
+    try:
+        read_timeout = float(os.getenv("CODEBUDDY_READ_TIMEOUT", "300"))
+    except ValueError:
+        read_timeout = 300.0
+
+    return {
+        "verify": SecurityConfig.get_ssl_verify(),
+        "timeout": httpx.Timeout(read_timeout, connect=connect_timeout, read=read_timeout),
+        "limits": httpx.Limits(max_keepalive_connections=keepalive, max_connections=max_conns),
+    }
+
+
+HTTP_CLIENT_CONFIG = _build_http_client_config()
 
 # --- 异步安全的 HTTP 客户端池 ---
 _http_client_pool: Optional[httpx.AsyncClient] = None
@@ -568,14 +601,24 @@ class CodeBuddyStreamService:
         return StreamingResponse(stream_with_retry(), media_type="text/event-stream", headers=SSE_HEADERS)
     
     async def handle_non_stream_response(self, payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
-        """处理非流式响应 - 使用修复后的聚合器，支持多工具调用"""
+        """处理非流式响应 - 使用修复后的聚合器，支持多工具调用 + 重试机制 + 熔断保护"""
         try:
             client = await get_http_client()
-            response = await client.post(get_codebuddy_api_url(), json=payload, headers=headers)
-            
+            response = await call_with_retry(
+                client.post,
+                get_codebuddy_api_url(),
+                json=payload,
+                headers=headers,
+                policy=RetryPolicy(max_retries=2, initial_delay=0.5, max_delay=4.0),
+            )
+
             if response.status_code != 200:
+                # 抛出 HTTPStatusError 以便 classify_exception 将其纳入重试/熔断决策
                 error_msg = response.text
-                self._handle_api_error(response.status_code, error_msg)
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError:
+                    self._handle_api_error(response.status_code, error_msg)
             
             aggregator = StreamResponseAggregator()
             buffer = ""
@@ -743,27 +786,39 @@ async def chat_completions(
         # 预处理请求
         payload = RequestProcessor.prepare_payload(request_body)
         usage_stats_manager.record_model_usage(payload.get("model", "unknown"))
-        
-        # 使用服务类处理请求
-        service = CodeBuddyStreamService()
-        client_wants_stream = request_body.get("stream", False)
-        
-        if client_wants_stream:
-            return await service.handle_stream_response(payload, headers)
-        else:
-            return await service.handle_non_stream_response(payload, headers)
-                
+
+        # 限流 + 熔断保护（对上游 CodeBuddy API 调用）
+        # 熔断打开时直接 503 拒绝，保护下游不被瞬时打挂
+        limiter = get_default_limiter()
+        breaker = get_default_breaker()
+        async with limiter.slot():
+            async with guarded(breaker):
+                # 使用服务类处理请求
+                service = CodeBuddyStreamService()
+                client_wants_stream = request_body.get("stream", False)
+
+                if client_wants_stream:
+                    return await service.handle_stream_response(payload, headers)
+                return await service.handle_non_stream_response(payload, headers)
+
     except HTTPException:
         raise
+    except CircuitOpenError as e:
+        logger.warning(f"熔断器开启，拒绝请求: {e}")
+        raise HTTPException(status_code=503, detail=f"上游服务暂时不可用: {e}")
     except Exception as e:
         logger.error(f"CodeBuddy V1 API错误: {e}")
         raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
 
 @router.get("/v1/models")
 async def list_v1_models(_token: str = Depends(authenticate)):
-    """获取CodeBuddy V1模型列表"""
+    """获取CodeBuddy V1模型列表（带 TTL 缓存，避免元数据接口成为热点）"""
+    cache = get_metadata_cache()
+    cached = await cache.get("models")
+    if cached is not None:
+        return cached
     try:
-        return {
+        result = {
             "object": "list",
             "data": [{
                 "id": model,
@@ -772,10 +827,41 @@ async def list_v1_models(_token: str = Depends(authenticate)):
                 "owned_by": "codebuddy"
             } for model in get_available_models_list()]
         }
-        
+        await cache.set("models", result)
+        return result
     except Exception as e:
         logger.error(f"获取V1模型列表错误: {e}")
         raise HTTPException(status_code=500, detail="获取模型列表失败")
+
+
+@router.get("/v1/models/{model_id}", summary="Get single model metadata")
+async def get_model(model_id: str, _token: str = Depends(authenticate)):
+    """根据 model_id 检索模型元信息（OpenAI 兼容）"""
+    available = set(get_available_models_list())
+    if model_id not in available:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"message": f"model '{model_id}' not found", "type": "invalid_request_error"}}
+        )
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "codebuddy",
+    }
+
+
+@router.get("/v1/health", summary="Service health & runtime snapshots")
+async def health(_token: str = Depends(authenticate)):
+    """返回熔断器与限流器运行时快照（运维/可观测）"""
+    limiter = get_default_limiter()
+    breaker = get_default_breaker()
+    return {
+        "status": "ok",
+        "timestamp": int(time.time()),
+        "limiter": limiter.snapshot(),
+        "breaker": breaker.snapshot(),
+    }
 
 @router.get("/v1/credentials", summary="List all available credentials")
 async def list_credentials(_token: str = Depends(authenticate)):
