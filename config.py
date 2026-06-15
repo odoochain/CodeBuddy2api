@@ -30,7 +30,11 @@ _DEFAULT_CONFIG = {
     "CODEBUDDY_CREDS_DIR": ".codebuddy_creds",
     "CODEBUDDY_LOG_LEVEL": "INFO",
     "CODEBUDDY_MODELS": "claude-4.0,claude-3.7,gpt-5,gpt-5-mini,gpt-5-nano,o4-mini,gemini-2.5-flash,gemini-2.5-pro,auto-chat",
-    "CODEBUDDY_ROTATION_COUNT": 1
+    "CODEBUDDY_ROTATION_COUNT": 1,
+    "IMA_OPENAPI_CLIENTID": None,
+    "IMA_OPENAPI_APIKEY": None,
+    "IMA_OPENAPI_BASE_URL": "https://ima.qq.com",
+    "IMA_ENABLED": True,
 }
 
 # --- Core Functions ---
@@ -154,6 +158,33 @@ def get_available_models() -> list:
 
 def get_rotation_count() -> int:
     return int(_get_config_value("CODEBUDDY_ROTATION_COUNT"))
+
+
+def get_ima_client_id() -> Optional[str]:
+    value = _get_config_value("IMA_OPENAPI_CLIENTID")
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def get_ima_api_key() -> Optional[str]:
+    value = _get_config_value("IMA_OPENAPI_APIKEY")
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def get_ima_base_url() -> str:
+    return str(_get_config_value("IMA_OPENAPI_BASE_URL") or "https://ima.qq.com").rstrip("/")
+
+
+def get_ima_enabled() -> bool:
+    value = _get_config_value("IMA_ENABLED")
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "t")
 
 # --- Public Setter for Hot-Reload ---
 

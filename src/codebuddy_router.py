@@ -18,6 +18,7 @@ from .codebuddy_api_client import codebuddy_api_client
 from .codebuddy_token_manager import codebuddy_token_manager
 from .usage_stats_manager import usage_stats_manager
 from .keyword_replacer import apply_keyword_replacement_to_system_message
+from .ima_router import is_ima_model, ima_openai_chat_completions, ima_list_models
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -763,16 +764,19 @@ async def chat_completions(
 async def list_v1_models(_token: str = Depends(authenticate)):
     """获取CodeBuddy V1模型列表"""
     try:
+        data = [{
+            "id": model,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "codebuddy"
+        } for model in get_available_models_list()]
+        # 追加 IMA 模型
+        data.extend(ima_list_models())
         return {
             "object": "list",
-            "data": [{
-                "id": model,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "codebuddy"
-            } for model in get_available_models_list()]
+            "data": data
         }
-        
+
     except Exception as e:
         logger.error(f"获取V1模型列表错误: {e}")
         raise HTTPException(status_code=500, detail="获取模型列表失败")

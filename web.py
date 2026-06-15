@@ -13,8 +13,9 @@ from src.codebuddy_router import router as codebuddy_router, lifecycle_manager
 from src.codebuddy_auth_router import router as codebuddy_auth_router
 from src.settings_router import router as settings_router
 from src.frontend_router import router as frontend_router
+from src.ima_router import router as ima_router, ima_startup, ima_shutdown
 
-from config import get_server_host, get_server_port, get_log_level
+from config import get_server_host, get_server_port, get_log_level, get_ima_enabled
 
 # 配置日志
 logging.basicConfig(
@@ -31,10 +32,14 @@ async def lifespan(app: FastAPI):
     try:
         # 启动时初始化资源
         await lifecycle_manager.startup()
+        if get_ima_enabled():
+            await ima_startup(app)
         yield
     finally:
         # 关闭时清理资源
         await lifecycle_manager.shutdown()
+        if get_ima_enabled():
+            await ima_shutdown(app)
         logger.info("CodeBuddy2API Service stopped")
 
 
@@ -87,6 +92,13 @@ app.include_router(
     prefix="/api",
     tags=["Settings Management"]
 )
+
+# 挂载 IMA 路由（独立 REST + OpenAI 兼容代理中 ima-* 模型）
+if get_ima_enabled():
+    app.include_router(
+        ima_router,
+        tags=["IMA (Knowledge Base & Notes)"]
+    )
 
 # 健康检查端点
 @app.get("/health")
