@@ -8,14 +8,24 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$WorkDir = 'D:\dev\lawpaddle\xz-copilot-hub'
-Set-Location -Path $WorkDir
-Write-Host "Working directory: $WorkDir" -ForegroundColor DarkGray
 
+# 输出辅助函数（先于调用点声明）
 function Write-Step($msg)  { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)    { Write-Host "OK  $msg" -ForegroundColor Green }
 function Write-Warn($msg)  { Write-Host "WARN $msg" -ForegroundColor Yellow }
 function Write-Err($msg)   { Write-Host "ERR $msg" -ForegroundColor Red }
+
+# 优先使用硬编码路径；若该路径不存在则回退到当前工作目录并提示。
+$HardcodedWorkDir = 'D:\dev\lawpaddle\xz-copilot-hub'
+if (Test-Path -LiteralPath $HardcodedWorkDir) {
+    $WorkDir = $HardcodedWorkDir
+} else {
+    $WorkDir = (Get-Location).Path
+    Write-Warn "Hardcoded WorkDir not found: $HardcodedWorkDir"
+    Write-Warn "Falling back to current location: $WorkDir"
+}
+Set-Location -Path $WorkDir
+Write-Host "Working directory: $WorkDir" -ForegroundColor DarkGray
 
 # 1. Check uv
 Write-Step "Checking uv installation..."
