@@ -29,7 +29,7 @@ _DEFAULT_CONFIG = {
     "CODEBUDDY_INTERNET_ENVIRONMENT": "",
     "CODEBUDDY_CREDS_DIR": ".codebuddy_creds",
     "CODEBUDDY_LOG_LEVEL": "INFO",
-    "CODEBUDDY_MODELS": "claude-4.0,claude-3.7,gpt-5,gpt-5-mini,gpt-5-nano,o4-mini,gemini-2.5-flash,gemini-2.5-pro,auto-chat",
+    "CODEBUDDY_MODELS": "claude-4.0,claude-3.7,gpt-5,gpt-5-mini,gpt-5-nano,minimax-m3,gemini-2.5-flash,gemini-2.5-pro,auto-chat",
     "CODEBUDDY_ROTATION_COUNT": 1
 }
 

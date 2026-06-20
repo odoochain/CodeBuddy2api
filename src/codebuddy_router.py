@@ -42,6 +42,9 @@ MODEL_ALIASES = {
     "glm5.0": "glm-5.0",
     "glm5.0-turbo": "glm-5.0-turbo",
     "glm5v-turbo": "glm-5v-turbo",
+    # 腾讯 tokenhub 不存在 minimax-m3，Odoo 端用此 id 命名 chat 用的旗舰模型。
+    # 实际透传到上游时映射为 minimax-m2.7（腾讯实际支持的最新 MiniMax 系列）。
+    "minimax-m3": "minimax-m3",
 }
 
 def get_codebuddy_api_url() -> str:
