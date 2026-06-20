@@ -1,0 +1,34 @@
+# Credentials / secrets
+.codebuddy_creds/
+config/config.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+
+# CodeGraph index (regenerable)
+.codegraph/
+
+# OS
+.DS_Store
+Thumbs.db
